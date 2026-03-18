@@ -199,7 +199,7 @@ def compute_abnormal_signals(
 # ─────────────────────────────────────────────
 
 def load_config(config_path: str = None) -> Dict[str, Any]:
-    """加载配置文件"""
+    """加载配置文件并校验当前 schema。"""
     if config_path is None:
         config_path = DEFAULT_CONFIG_PATH
 
@@ -207,8 +207,24 @@ def load_config(config_path: str = None) -> Dict[str, Any]:
     if not config_file.exists():
         raise FileNotFoundError(f"配置文件不存在: {config_file}")
 
-    with open(config_file, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ValueError(f"配置文件格式错误: {e}")
+
+    if not isinstance(config, dict):
+        raise ValueError("配置文件格式错误: 顶层必须是对象")
+    if 'anchor' not in config:
+        raise ValueError("配置文件缺少必要字段: anchor")
+    if not isinstance(config['anchor'], dict):
+        raise ValueError("配置文件格式错误: anchor 必须是对象")
+    if 'code' not in config['anchor']:
+        raise ValueError("配置文件缺少必要字段: anchor.code")
+    if 'core_universe' not in config or not config['core_universe']:
+        raise ValueError("配置文件缺少必要字段: core_universe 或字段为空")
+
+    return config
 
 
 def get_universe_version(config: Dict[str, Any]) -> str:
@@ -217,21 +233,6 @@ def get_universe_version(config: Dict[str, Any]) -> str:
     stocks.yaml 中 version 字段缺失时返回 "unknown"。
     """
     return str(config.get("version", "unknown"))
-
-    try:
-        with open(config_file, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        raise ValueError(f"配置文件格式错误: {e}")
-
-    if 'anchor' not in config:
-        raise ValueError("配置文件缺少必要字段: anchor")
-    if 'code' not in config['anchor']:
-        raise ValueError("配置文件缺少必要字段: anchor.code")
-    if 'core_universe' not in config or not config['core_universe']:
-        raise ValueError("配置文件缺少必要字段: core_universe 或字段为空")
-
-    return config
 
 
 def load_market_data(data_path: str = None) -> pd.DataFrame:
@@ -326,8 +327,20 @@ def analyze_anchor_symbol(
     core_codes = [code for code in core_codes if code != anchor_symbol]
     core_total_count = len(core_codes)
 
-    # 2. 加载市场数据
-    df = load_market_data(data_path)
+    # 2. 加载价格底座
+    price_product = None
+    daily_basic_df = None
+    moneyflow_df = None
+    if data_path is None:
+        from price_data_product import load_price_inputs
+
+        price_inputs = load_price_inputs(config_path=config_path)
+        price_product = price_inputs["product"]
+        df = price_inputs["market_data"]
+        daily_basic_df = price_inputs["daily_basic_data"]
+        moneyflow_df = price_inputs["moneyflow_data"]
+    else:
+        df = load_market_data(data_path)
 
     # as_of_date 截断：只保留 <= 指定日期的数据
     if as_of_date is not None:
@@ -346,7 +359,7 @@ def analyze_anchor_symbol(
 
     anchor_df = anchor_df.sort_values('trade_date').reset_index(drop=True)
     latest = anchor_df.iloc[-1]
-    latest_date = latest['trade_date']
+    latest_date = pd.Timestamp(latest['trade_date'])
 
     # A. 锚定标的当日涨跌幅
     if len(anchor_df) >= 2:
@@ -493,12 +506,12 @@ def analyze_anchor_symbol(
     # ─────────────────────────────────────────
     # v2.4 新增：daily_basic（PE/PB/市值）
     # ─────────────────────────────────────────
-    basic_fields = _load_daily_basic(anchor_symbol, latest_date)
+    basic_fields = _load_daily_basic(anchor_symbol, latest_date, daily_basic_df)
 
     # ─────────────────────────────────────────
     # v2.4 新增：moneyflow（资金流向）
     # ─────────────────────────────────────────
-    flow_fields = _load_moneyflow(anchor_symbol, latest_date)
+    flow_fields = _load_moneyflow(anchor_symbol, latest_date, moneyflow_df)
 
     # ─────────────────────────────────────────
     # v2.5 新增：三类状态标签
@@ -596,6 +609,11 @@ def analyze_anchor_symbol(
         # v2.6 新增：research_core 平行字段
         'research_avg_return':          research_avg_return,
         'research_relative_strength':   research_relative_strength,
+        # v3.0 新增：价格数据产品状态
+        'price_data_product_status': None if price_product is None else price_product.get('overall_status'),
+        'market_data_status': None if price_product is None else price_product.get('market_data_status'),
+        'daily_basic_status': None if price_product is None else price_product.get('daily_basic_status'),
+        'moneyflow_status': None if price_product is None else price_product.get('moneyflow_status'),
     }
 
     return result
@@ -827,7 +845,7 @@ def compute_activity_label(
     return "正常"
 
 
-def _load_daily_basic(anchor_symbol: str, trade_date) -> dict:
+def _load_daily_basic(anchor_symbol: str, trade_date, source_df: Optional[pd.DataFrame] = None) -> dict:
     """
     从 raw 层加载 daily_basic，提取当日 PE/PB/市值字段。
     文件不存在或当日无数据时返回空字段（不影响主流程）。
@@ -838,10 +856,13 @@ def _load_daily_basic(anchor_symbol: str, trade_date) -> dict:
         'total_mv': None, 'circ_mv': None,
         'turnover_rate': None, 'turnover_rate_f': None,
     }
-    if not path.exists():
-        return empty
     try:
-        df = pd.read_parquet(path)
+        if source_df is not None:
+            df = source_df.copy()
+        elif path.exists():
+            df = pd.read_parquet(path)
+        else:
+            return empty
         if df.empty:
             return empty
         # trade_date 统一格式
@@ -871,7 +892,7 @@ def _load_daily_basic(anchor_symbol: str, trade_date) -> dict:
         return empty
 
 
-def _load_moneyflow(anchor_symbol: str, trade_date) -> dict:
+def _load_moneyflow(anchor_symbol: str, trade_date, source_df: Optional[pd.DataFrame] = None) -> dict:
     """
     从 raw 层加载 moneyflow，提取当日净流入字段。
     文件不存在或当日无数据时返回空字段（不影响主流程）。
@@ -887,10 +908,13 @@ def _load_moneyflow(anchor_symbol: str, trade_date) -> dict:
         'buy_lg_amount': None, 'sell_lg_amount': None,
         'buy_elg_amount': None, 'sell_elg_amount': None,
     }
-    if not path.exists():
-        return empty
     try:
-        df = pd.read_parquet(path)
+        if source_df is not None:
+            df = source_df.copy()
+        elif path.exists():
+            df = pd.read_parquet(path)
+        else:
+            return empty
         if df.empty:
             return empty
         if df['trade_date'].dtype.kind == 'M':

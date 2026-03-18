@@ -1,6 +1,6 @@
 """
-统一执行入口 v2.2
-串联 MVP 流程：fetcher → analyzer → event_layer → reporter → validation
+统一执行入口
+串联主流程：fetcher → normalizer → price_data_product → analyzer → rolling_analyzer → event_layer → reporter → validation
 
 运行模式：
   full run (默认):     拉数据 → 算指标 → 事件层 → 生成报告 → 校验
@@ -32,6 +32,7 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 DEFAULT_RAW_DATA = DATA_RAW_DIR / "market_data.parquet"
 DEFAULT_METRICS = DATA_PROCESSED_DIR / "daily_metrics.parquet"
 DEFAULT_EVENTS = PROJECT_ROOT / "data" / "processed" / "daily_events.json"
+DEFAULT_PRICE_PRODUCT = DATA_PROCESSED_DIR / "price_data_product.json"
 
 
 def print_banner():
@@ -111,6 +112,33 @@ def validate_metrics() -> Tuple[bool, str]:
 
     except Exception as e:
         return False, f"读取指标数据失败: {e}"
+
+
+def validate_price_data_product() -> Tuple[bool, str]:
+    """
+    验证价格数据产品是否存在且可用
+
+    Returns:
+        (is_valid, message)
+    """
+    if not DEFAULT_PRICE_PRODUCT.exists():
+        return False, f"价格数据产品不存在: {DEFAULT_PRICE_PRODUCT}"
+
+    import json
+    try:
+        with open(DEFAULT_PRICE_PRODUCT, "r", encoding="utf-8") as f:
+            product = json.load(f)
+    except Exception as e:
+        return False, f"读取价格数据产品失败: {e}"
+
+    overall_status = product.get("overall_status")
+    latest_trade_date = product.get("latest_trade_date")
+    if overall_status == "error":
+        return False, f"价格底座不可用: {product.get('market_data_reason') or overall_status}"
+    if not latest_trade_date:
+        return False, "价格数据产品缺少 latest_trade_date"
+
+    return True, f"价格数据产品有效 ({latest_trade_date}, 状态: {overall_status})"
 
 
 def validate_report(report_path: str) -> Tuple[bool, str]:
@@ -231,7 +259,7 @@ def run_archive() -> Tuple[bool, str]:
     Returns:
         (success, message)
     """
-    print_stage("Stage 6: 按日归档 (Archive)", "running")
+    print_stage("Stage 9: 按日归档 (Archive)", "running")
 
     try:
         import pandas as pd
@@ -260,15 +288,15 @@ def run_analyzer() -> Tuple[bool, str]:
     Returns:
         (success, message)
     """
-    print_stage("Stage 3: 指标分析 (Analyzer)", "running")
+    print_stage("Stage 4: 指标分析 (Analyzer)", "running")
 
     try:
         from analyzer import analyze_anchor_symbol, save_metrics
 
-        # 先验证原始数据
-        is_valid, msg = validate_raw_data()
+        # 先验证价格数据产品
+        is_valid, msg = validate_price_data_product()
         if not is_valid:
-            return False, f"原始数据验证失败: {msg}"
+            return False, f"价格数据产品验证失败: {msg}"
 
         # 执行分析
         result = analyze_anchor_symbol()
@@ -285,6 +313,34 @@ def run_analyzer() -> Tuple[bool, str]:
         return False, f"指标分析异常: {e}"
 
 
+def run_price_data_product() -> Tuple[bool, str]:
+    """
+    构建价格数据产品
+
+    Returns:
+        (success, message)
+    """
+    print_stage("Stage 3: 价格底座 (Price Data Product)", "running")
+
+    try:
+        from price_data_product import build_price_data_product
+
+        product = build_price_data_product()
+        if product.get("overall_status") == "error":
+            return False, f"价格底座构建失败: {product.get('market_data_reason') or product['overall_status']}"
+
+        return True, (
+            f"价格底座完成：{product['latest_trade_date']} | "
+            f"overall={product['overall_status']} | "
+            f"market={product['market_data_status']} | "
+            f"basic={product['daily_basic_status']} | "
+            f"moneyflow={product['moneyflow_status']}"
+        )
+
+    except Exception as e:
+        return False, f"价格底座异常: {e}"
+
+
 def run_rolling_analyzer() -> Tuple[bool, str]:
     """
     执行连续观察层计算（archive → rolling_metrics）
@@ -292,7 +348,7 @@ def run_rolling_analyzer() -> Tuple[bool, str]:
     Returns:
         (success, message)
     """
-    print_stage("Stage 4: 连续观察层 (Rolling Analyzer)", "running")
+    print_stage("Stage 5: 连续观察层 (Rolling Analyzer)", "running")
 
     try:
         from rolling_analyzer import compute_rolling_metrics
@@ -314,7 +370,7 @@ def run_event_layer() -> Tuple[bool, str]:
         (success, message)
         注意：失败时返回 (False, msg) 但 pipeline 不会因此中止
     """
-    print_stage("Stage 3: 事件层 (Event Layer)", "running")
+    print_stage("Stage 5: 事件层 (Event Layer)", "running")
 
     try:
         import pandas as pd
@@ -336,13 +392,15 @@ def run_event_layer() -> Tuple[bool, str]:
 
         result = collect_events(trade_date, anchor_code, anchor_name)
 
-        if result.get('error'):
-            return False, f"事件层部分失败: {result['error']}"
+        overall_status = result.get("overall_status", "error")
+        if overall_status == "error":
+            return False, f"新闻数据产品构建失败: {result.get('error') or overall_status}"
 
         return True, (
-            f"事件层完成：{len(result['company_announcements'])} 条公告，"
+            f"新闻数据产品完成：{len(result['company_announcements'])} 条公告，"
             f"{len(result['company_news'])} 条公司新闻，"
             f"{len(result['sector_news'])} 条板块新闻，"
+            f"overall={overall_status}，"
             f"信号：{result['event_signal_label']}"
         )
 
@@ -350,14 +408,14 @@ def run_event_layer() -> Tuple[bool, str]:
         return False, f"事件层异常: {e}"
 
 
-def run_reporter() -> Tuple[bool, str, Optional[str]]:
+def run_reporter(include_events: bool = True) -> Tuple[bool, str, Optional[str]]:
     """
     执行报告生成阶段
 
     Returns:
         (success, message, report_path)
     """
-    print_stage("Stage 5: 报告生成 (Reporter)", "running")
+    print_stage("Stage 6: 报告生成 (Reporter)", "running")
 
     try:
         from reporter import generate_daily_report
@@ -368,7 +426,7 @@ def run_reporter() -> Tuple[bool, str, Optional[str]]:
             return False, f"指标数据验证失败: {msg}", None
 
         # 生成报告
-        report_path = generate_daily_report()
+        report_path = generate_daily_report(include_events=include_events)
 
         return True, f"报告生成成功: {report_path}", report_path
 
@@ -383,7 +441,7 @@ def run_e2e_validation(report_path: Optional[str] = None) -> Tuple[bool, str]:
     Returns:
         (success, message)
     """
-    print_stage("Stage 4: E2E 验证 (Validation)", "running")
+    print_stage("Stage 7: E2E 验证 (Validation)", "running")
 
     errors = []
 
@@ -436,13 +494,14 @@ def run_pipeline(skip_fetch: bool = False, skip_events: bool = False) -> int:
     执行完整 pipeline v2.4
 
     执行顺序：
-      fetcher → normalizer → analyzer → rolling_analyzer → event_layer → reporter → validation → archive
+      fetcher → normalizer → price_data_product → analyzer → rolling_analyzer → event_layer → reporter → validation → archive
     """
     print_banner()
 
     results = {
         "fetcher":          None,
         "normalizer":       None,
+        "price_data_product": None,
         "analyzer":         None,
         "rolling_analyzer": None,
         "event_layer":      None,
@@ -471,14 +530,21 @@ def run_pipeline(skip_fetch: bool = False, skip_events: bool = False) -> int:
     if not success:
         print(f"\n[WARN] normalizer 失败，analyzer 将降级从 raw 层读取: {msg}")
 
-    # Stage 3: 指标分析
+    # Stage 3: 价格底座
+    success, msg = run_price_data_product()
+    results["price_data_product"] = "success" if success else "failed"
+    if not success:
+        print(f"\n[ERROR] {msg}")
+        return 1
+
+    # Stage 4: 指标分析
     success, msg = run_analyzer()
     results["analyzer"] = "success" if success else "failed"
     if not success:
         print(f"\n[ERROR] {msg}")
         return 1
 
-    # Stage 4: 连续观察层（失败不中止）
+    # Stage 5: 连续观察层（失败不中止）
     success, msg = run_rolling_analyzer()
     if success:
         results["rolling_analyzer"] = "success"
@@ -486,7 +552,7 @@ def run_pipeline(skip_fetch: bool = False, skip_events: bool = False) -> int:
         print(f"\n[WARN] 连续观察层失败（不影响主流程）: {msg}")
         results["rolling_analyzer"] = "failed"
 
-    # Stage 5: 事件层（可选跳过，失败不中止）
+    # Stage 6: 事件层（可选跳过，失败不中止）
     if skip_events:
         print_stage("Stage 5: 事件层 (Event Layer)", "skipped")
         print("  跳过事件层")
@@ -499,20 +565,20 @@ def run_pipeline(skip_fetch: bool = False, skip_events: bool = False) -> int:
             print(f"\n[WARN] 事件层失败（不影响主流程）: {msg}")
             results["event_layer"] = "failed"
 
-    # Stage 6: 报告生成
-    success, msg, report_path = run_reporter()
+    # Stage 7: 报告生成
+    success, msg, report_path = run_reporter(include_events=not skip_events)
     results["reporter"] = "success" if success else "failed"
     if not success:
         print(f"\n[ERROR] {msg}")
         return 1
 
-    # Stage 7: E2E 验证
+    # Stage 8: E2E 验证
     success, msg = run_e2e_validation(report_path)
     results["validation"] = "success" if success else "failed"
     if not success:
         print(f"\n[WARN] {msg}")
 
-    # Stage 8: 按日归档
+    # Stage 9: 按日归档
     success, msg = run_archive()
     results["archive"] = "success" if success else "failed"
     if not success:

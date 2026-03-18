@@ -1,6 +1,12 @@
 # 环境变量
 .env
 
+# 运行产物 / 本地数据
+data/
+archive/
+reports/
+daily-reports/
+
 # Python
 __pycache__/
 *.py[cod]

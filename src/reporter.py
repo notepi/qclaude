@@ -1,17 +1,6 @@
 """
-报告生成模块 v2.1.1
-生成结构化 Markdown 格式的每日复盘报告
-
-v2.1 报告结构（固定4部分）：
-1. 今日结论
-2. 核心指标
-3. 板块位置
-4. 今日异常信号
-
-配置说明：
-- 板块均值仅基于 core_universe 计算
-- anchor_symbol（锚定标的）不参与均值计算
-- extended_universe 暂不参与均值计算
+报告生成模块
+生成 Markdown 格式的每日复盘报告。
 """
 
 import pandas as pd
@@ -256,6 +245,7 @@ def build_rolling_section(rolling: Optional[Dict[str, Any]], anchor_name: str) -
 
     rs_series  = rolling.get("rs_5d_series", [])
     avg_series = rolling.get("amount_vs_5d_avg_series", [])
+    rs_mean = rolling.get("rs_5d_mean")
 
     # 连续性数字
     rs_out_days   = rolling.get("rs_outperform_days_5d", 0) or 0
@@ -287,6 +277,18 @@ def build_rolling_section(rolling: Optional[Dict[str, Any]], anchor_name: str) -
         )
     else:
         capital_block = ""
+
+    rs_mean_str = f"{rs_mean:+.2%}" if rs_mean is not None else "N/A"
+    if mf_inflow_days is not None:
+        rolling_summary = (
+            f"近{n}日跑赢板块 {rs_out_days}/{n} 日，平均相对强弱 {rs_mean_str}；"
+            f"主力资金净流入 {mf_inflow_days}/{n} 日，整体呈现 {cf_trend_label}。"
+        )
+    else:
+        rolling_summary = (
+            f"近{n}日跑赢板块 {rs_out_days}/{n} 日，平均相对强弱 {rs_mean_str}；"
+            f"量能整体维持 {volume_label}。"
+        )
 
     # 动量 emoji
     momentum_emoji_map = {
@@ -331,17 +333,9 @@ def build_rolling_section(rolling: Optional[Dict[str, Any]], anchor_name: str) -
 **成交额倍数序列**：{_avg_seq(avg_series)}
 
 > {trend_summary}
+
+> 摘要：{rolling_summary}
 """
-    """为标签加 emoji"""
-    mapping = {
-        "强": "🟢 强",
-        "中": "🟡 中",
-        "弱": "🔴 弱",
-        "中性偏强": "🟢 中性偏强",
-        "中性": "🟡 中性",
-        "中性偏弱": "🔴 中性偏弱",
-    }
-    return mapping.get(label, label)
 
 
 def label_emoji(label: str) -> str:
@@ -364,7 +358,8 @@ def label_emoji(label: str) -> str:
 def generate_daily_report(
     metrics_path: str = None,
     config_path: str = None,
-    events_path: str = None
+    events_path: str = None,
+    include_events: bool = True,
 ) -> str:
     """
     生成每日复盘报告（v2.2 结构）
@@ -373,20 +368,26 @@ def generate_daily_report(
     1. 今日结论
     2. 核心指标
     3. 板块位置
-    4. 今日异常信号
+    4. 今日关注信号
     5. 今日可能驱动因素（事件层，可选）
     """
     # 1. 加载数据
     config = load_config(config_path)
     metrics = load_latest_metrics(metrics_path)
+    try:
+        from price_data_product import load_price_data_product
+        price_product = load_price_data_product()
+    except Exception as e:
+        raise ValueError(f"价格数据产品不可用: {e}")
 
     # 加载事件层（可选，不存在时降级）
     events = None
-    try:
-        from event_layer import load_events
-        events = load_events(events_path)
-    except Exception:
-        pass  # 事件层不可用时静默降级
+    if include_events:
+        try:
+            from event_layer import load_events
+            events = load_events(events_path)
+        except Exception:
+            pass  # 事件层不可用时静默降级
 
     # 加载连续观察层（可选，不存在时降级）
     rolling = None
@@ -420,6 +421,12 @@ def generate_daily_report(
         date_str = str(trade_date)
         date_file_str = date_str.replace('-', '')
 
+    product_trade_date = price_product.get("latest_trade_date")
+    if product_trade_date and product_trade_date != date_file_str:
+        raise ValueError(
+            f"价格数据产品交易日 ({product_trade_date}) 与 metrics ({date_file_str}) 不一致"
+        )
+
     # 取值
     anchor_return = metrics.get('anchor_return')
     sector_avg_return = metrics.get('sector_avg_return')
@@ -435,7 +442,10 @@ def generate_daily_report(
     price_strength_label = metrics.get('price_strength_label', 'N/A')
     volume_strength_label = metrics.get('volume_strength_label', 'N/A')
     overall_signal_label = metrics.get('overall_signal_label', 'N/A')
-    abnormal_signals: List[str] = metrics.get('abnormal_signals', [])
+    abnormal_signals = metrics.get('abnormal_signals', [])
+    if hasattr(abnormal_signals, "tolist"):
+        abnormal_signals = abnormal_signals.tolist()
+    abnormal_signals = list(abnormal_signals) if abnormal_signals else []
 
     # v2.5 新增状态标签
     valuation_label    = metrics.get('valuation_label', 'N/A')
@@ -451,6 +461,10 @@ def generate_daily_report(
     # v2.6 新增 research_core 字段
     research_avg_return        = metrics.get('research_avg_return')
     research_relative_strength = metrics.get('research_relative_strength')
+    price_data_product_status  = metrics.get('price_data_product_status') or price_product.get('overall_status', 'N/A')
+    market_data_status         = metrics.get('market_data_status') or price_product.get('market_data_status', 'N/A')
+    daily_basic_status         = metrics.get('daily_basic_status') or price_product.get('daily_basic_status', 'N/A')
+    moneyflow_status           = metrics.get('moneyflow_status') or price_product.get('moneyflow_status', 'N/A')
 
     # rolling 动量标签（用于状态面板）
     momentum_label = rolling.get('momentum_label', 'N/A') if rolling else 'N/A'
@@ -487,7 +501,7 @@ def generate_daily_report(
 | 价格资金关系 | {_panel_emoji(price_capital_relation_label)} |
 | 活跃度 | {_panel_emoji(activity_label)} |
 | 估值 | {_panel_emoji(valuation_label)} |
-| 短期动量 | {_panel_emoji(momentum_label)} |
+| 近5日结构 | {_panel_emoji(momentum_label)} |
 """
 
     # ─────────────────────────────────────────
@@ -542,24 +556,24 @@ def generate_daily_report(
     diagnosis_reasons = diagnosis_reasons[:2]
     
     # 2. 一致性判断
+    momentum = rolling.get('momentum_label', '') if rolling else ''
     if rolling:
-        momentum = rolling.get('momentum_label', '')
         rs_5d = rolling.get('rs_5d_mean', 0) or 0
         
         # 今日弱 vs 近5日强
         if overall_signal_label and "弱" in overall_signal_label:
-            if momentum in ["价强量稳", "价增量涨"] or rs_5d > 0.01:
+            if momentum in ["量价齐升", "价强量稳"] or rs_5d > 0.01:
                 consistency_note = "短线回撤，但近5日仍维持强势结构"
-            elif momentum in ["价弱量缩", "价跌量缩"]:
+            elif momentum in ["量价齐弱", "放量下跌"]:
                 consistency_note = "跌势延续，弱势结构确认"
             else:
                 consistency_note = "与近5日趋势基本一致"
         
         # 今日强 vs 近5日弱
         elif overall_signal_label and "强" in overall_signal_label:
-            if momentum in ["价弱量缩", "价跌量缩"] or rs_5d < -0.01:
+            if momentum in ["量价齐弱", "放量下跌"] or rs_5d < -0.01:
                 consistency_note = "单日反弹，需观察持续性"
-            elif momentum in ["价强量稳", "价增量涨"]:
+            elif momentum in ["量价齐升", "价强量稳"]:
                 consistency_note = "强势延续，趋势向好"
             else:
                 consistency_note = "与近5日趋势基本一致"
@@ -575,61 +589,37 @@ def generate_daily_report(
         if "流出" in rolling['capital_flow_trend_label']:
             next_watch = "资金面是否转暖"
     
-    # 构建诊断字符串
-    diagnosis_str = ""
-    if diagnosis_reasons:
-        diagnosis_str = "**" + "；".join(diagnosis_reasons) + "**"
-    
-    if consistency_note:
-        if diagnosis_str:
-            diagnosis_str += f"\n\n- **与近5日状态**：{consistency_note}"
-        else:
-            diagnosis_str = f"**与近5日状态**：{consistency_note}"
-    
-    if next_watch:
-        if diagnosis_str:
-            diagnosis_str += f"\n\n- **下一步关注**：{next_watch}"
-        else:
-            diagnosis_str = f"**下一步关注**：{next_watch}"
-    
-    # 拼装结论小节
+    # 当前状态
+    if overall_signal_label == "强":
+        current_state = "整体偏强，价格与量能维持较好配合。"
+    elif overall_signal_label == "中性偏强":
+        current_state = "整体偏强，但仍需继续确认持续性。"
+    elif overall_signal_label == "中性":
+        current_state = "整体中性，暂未形成明确方向。"
+    elif overall_signal_label == "中性偏弱":
+        current_state = "整体偏弱，短线仍处于回撤与消化阶段。"
+    elif overall_signal_label == "弱":
+        current_state = "整体偏弱，价格与资金面仍有压力。"
+    else:
+        current_state = "当前状态待进一步确认。"
+
+    primary_reasons = "；".join(diagnosis_reasons) if diagnosis_reasons else "主要表现为跟随板块波动，暂未见独立驱动。"
+    next_watch = next_watch or "成交量与资金流向变化"
+
     section_conclusion = f"""## 一、今日结论
 
-| 维度 | 标签 |
-|------|------|
-| 价格强度 | {label_emoji(price_strength_label)} |
-| 成交额强度 | {label_emoji(volume_strength_label)} |
-| **综合信号** | **{label_emoji(overall_signal_label)}** |
-
-### 📌 诊断
-{diagnosis_str}
+- **当前状态**：{current_state}
+- **主要原因**：{primary_reasons}
+- **下一步观察**：{next_watch}
 """
 
     # ─────────────────────────────────────────
     # 交易解释层 v2.0 增强（内联简化版）
     # ─────────────────────────────────────────
     
-    # 生成状态解释
+    # 生成状态解释（只做证据拆解，不重复结论）
     explain_lines = []
-    
-    # 1. 状态总结
-    if overall_signal_label:
-        if "强" in overall_signal_label and "偏弱" not in overall_signal_label:
-            state_summary = "当前处于相对强势状态，但需警惕持续性"
-        elif "偏弱" in overall_signal_label:
-            state_summary = "整体偏弱，但尚未出现恐慌性抛售"
-        elif "弱" in overall_signal_label:
-            state_summary = "当前处于弱势状态，关注是否超跌"
-        else:
-            state_summary = "当前状态中性，方向尚不明确"
-    else:
-        state_summary = "当前状态待观察"
-    
-    explain_lines.append(f"**{state_summary}**")
-    explain_lines.append("")
-    
-    # 2. 核心驱动
-    explain_lines.append("**核心驱动：**")
+
     drivers = []
     
     # 价格维度
@@ -659,9 +649,19 @@ def generate_daily_report(
     
     # 动量维度
     if momentum_label == "价强量稳":
-        drivers.append("量价配合良好，动量健康")
+        if overall_signal_label in {"中性偏弱", "弱"}:
+            drivers.append("短期回撤，但中期结构未明显失真")
+        else:
+            drivers.append("近5日结构尚稳，量价关系未见明显破坏")
+    elif momentum_label == "量价齐升":
+        if overall_signal_label in {"中性偏弱", "弱"}:
+            drivers.append("近5日结构尚未完全破坏")
+        else:
+            drivers.append("近5日结构偏强，量价仍有配合")
     elif momentum_label == "量价齐弱":
         drivers.append("量价齐弱，动量不足")
+    elif momentum_label == "放量下跌":
+        drivers.append("放量回撤，短线承压仍较明显")
     
     # 研究层分化
     if research_relative_strength is not None and relative_strength is not None:
@@ -671,47 +671,64 @@ def generate_daily_report(
             else:
                 drivers.append(f"研究层相对更弱（差 {relative_strength - research_relative_strength:.2%}），铂力特在核心环节占优")
     
-    # 异常信号
-    if abnormal_signals and len(abnormal_signals) > 0:
-        drivers.append(f"异常信号: {', '.join(abnormal_signals[:2])}")
-    
     if not drivers:
-        drivers.append("暂无显著驱动因素")
+        drivers.append("暂无额外证据补充")
     
-    for driver in drivers[:3]:
+    explain_lines.append("### 状态解释")
+    for driver in drivers[:4]:
         explain_lines.append(f"- {driver}")
-    
-    explain_lines.append("")
-    
-    # 3. 下一步关注
-    next_watch = ""
-    if cf_trend and "流出" in cf_trend:
-        next_watch = "明日主力资金是否回流"
-    elif price_strength_label == "弱" and volume_strength_label == "弱":
-        next_watch = "是否出现缩量企稳信号"
-    elif relative_strength is not None and relative_strength < -0.01:
-        next_watch = "板块情绪是否改善"
-    elif research_relative_strength is not None and relative_strength is not None and abs(research_relative_strength - relative_strength) > 0.005:
-        next_watch = "研究层与交易层分化是否收敛"
-    else:
-        next_watch = "成交量与资金流向变化"
-    
-    explain_lines.append(f"**下一步关注：**{next_watch}")
-    
-    # 4. 超跌反弹观察
-    rebound_conditions = [
-        1 if overall_signal_label and ("偏弱" in overall_signal_label or "弱" in overall_signal_label) else 0,
-        1 if price_strength_label == "弱" else 0,
-        1 if (volume_strength_label == "弱" or (cf_trend and "流出" in cf_trend)) else 0,
-    ]
-    if sum(rebound_conditions) >= 2:
-        explain_lines.append("")
-        explain_lines.append("⚠️ **超跌反弹观察**：当前处于弱势，但抛压减轻，关注反弹信号")
-    
+
     explanation_str = "\n".join(explain_lines)
-    section_conclusion = section_conclusion.rstrip() + f"\n\n### 📊 状态解释\n\n{explanation_str}\n"
+    section_conclusion = section_conclusion.rstrip() + f"\n\n{explanation_str}\n"
 
     # ─────────────────────────────────────────
+    # 评分层快照（翻译成人话）
+    score_snapshot = ""
+    try:
+        from score_layer import calc_score
+
+        score_row = pd.Series({
+            "overall_signal_label": overall_signal_label,
+            "price_strength_label": price_strength_label,
+            "volume_strength_label": volume_strength_label,
+            "momentum_label": momentum_label,
+            "capital_flow_trend_label": rolling.get("capital_flow_trend_label", "") if rolling else "",
+        })
+        score_result = calc_score(score_row)
+
+        drag_items = []
+        support_items = []
+
+        if price_strength_label == "弱":
+            drag_items.append("价格表现偏弱")
+        if capital_flow_label == "主力偏空":
+            drag_items.append("主力资金偏空")
+        if rolling and "流出" in str(rolling.get("capital_flow_trend_label", "")):
+            drag_items.append("近5日资金持续流出")
+        if volume_strength_label == "弱":
+            drag_items.append("量能偏弱")
+
+        if momentum_label in {"价强量稳", "量价齐升"}:
+            support_items.append("近5日结构尚未明显破坏")
+        if relative_strength is not None and relative_strength > -0.005:
+            support_items.append("相对板块并未明显失真")
+        if return_rank_in_sector is not None and return_rank_in_sector <= 2:
+            support_items.append("板块内位置仍处前列")
+
+        drag_text = "；".join(drag_items[:2]) if drag_items else "暂无明显拖累项"
+        support_text = "；".join(support_items[:2]) if support_items else "暂未见明显缓冲项"
+
+        score_snapshot = (
+            f"\n\n### 评分层快照\n"
+            f"- **整体判断**：{score_result['signal_rating']}\n"
+            f"- **主要拖累项**：{drag_text}\n"
+            f"- **主要缓冲项**：{support_text}\n"
+        )
+    except Exception:
+        score_snapshot = ""
+
+    section_conclusion = section_conclusion.rstrip() + score_snapshot
+
     # 反抽观察层 v1.0
     # ─────────────────────────────────────────
     try:
@@ -741,8 +758,10 @@ def generate_daily_report(
         if rebound_result["rebound_watch_flag"]:
             rebound_section = format_rebound_section(rebound_result)
             section_conclusion = section_conclusion.rstrip() + f"\n\n{rebound_section}\n"
+        else:
+            section_conclusion = section_conclusion.rstrip() + "\n\n当前未触发反抽观察。\n"
     except Exception:
-        pass
+        section_conclusion = section_conclusion.rstrip() + "\n\n当前未触发反抽观察。\n"
 
     # ─────────────────────────────────────────
     # 第2部分：近5日状态（连续观察层）
@@ -805,7 +824,6 @@ def generate_daily_report(
 
     capital_summary = build_capital_summary(metrics)
     capital_summary_md = f"\n> 💡 {capital_summary}" if capital_summary else ""
-
     section_metrics = f"""## 三、核心指标
 
 | 指标 | 数值 |
@@ -817,7 +835,6 @@ def generate_daily_report(
 | 成交额创20日新高 | {amount_20d_str} |
 | 成交额 / 5日均值 | {fmt_multiple(amount_vs_5d_avg)} |
 {basic_rows}{flow_rows}
-> **均值口径**：板块均值基于 core_universe（{core_universe_count}/{sector_total_count} 只），**不含{anchor_name}**。
 {capital_summary_md}
 """
 
@@ -826,21 +843,32 @@ def generate_daily_report(
     # ─────────────────────────────────────────
     rank_total = sector_total_size if isinstance(sector_total_size, int) else "N/A"
 
-    section_sector = f"""## 四、板块位置
+    def fmt_rank_natural(rank: Optional[int], total: int) -> str:
+        if rank is None or not isinstance(total, int):
+            return "N/A"
+        if rank == 1:
+            return f"{total}只样本中居首位"
+        if rank == total:
+            return f"{total}只样本中居末位"
+        mid = (total + 1) / 2
+        if rank < mid:
+            return f"{total}只样本中位列中间偏前位置（第{rank}位）"
+        if rank > mid:
+            return f"{total}只样本中位列中间偏后位置（第{rank}位）"
+        return f"{total}只样本中位列中间位置（第{rank}位）"
 
-> **排名口径**：core_universe（{core_universe_count} 只）+ {anchor_name}，共 {rank_total} 只，**不含 extended_universe**。  
-> 与均值口径的区别：排名将{anchor_name}纳入比较，均值计算则将其排除。
+    section_sector = f"""## 四、板块位置
 
 | 维度 | 排名 |
 |------|------|
-| 涨跌幅排名 | {fmt_rank(return_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"} |
-| 成交额排名 | {fmt_rank(amount_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"} |
+| 涨跌幅位置 | {fmt_rank_natural(return_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"} |
+| 成交额位置 | {fmt_rank_natural(amount_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"} |
 """
 
     # ─────────────────────────────────────────
-    # 第5部分：今日异常信号
+    # 第5部分：今日关注信号
     # ─────────────────────────────────────────
-    # 合并行情异常信号 + 资金结构背离信号
+    # 合并行情信号 + 资金结构背离信号
     all_signals = list(abnormal_signals)
 
     # 价格资金背离信号（v2.5B.1）
@@ -848,12 +876,15 @@ def generate_daily_report(
     if price_capital_relation_label in divergence_signals:
         all_signals.append(f"价格资金背离：{price_capital_relation_label}")
 
-    if all_signals:
+    benign_rank_signals = {"涨幅位居板块前二", "成交额位居板块前二"}
+    has_material_signal = any(sig not in benign_rank_signals for sig in all_signals)
+
+    if all_signals and has_material_signal:
         signals_md = "\n".join(f"- ⚡ {sig}" for sig in all_signals)
     else:
-        signals_md = "今日无显著异常信号。"
+        signals_md = "暂无显著异常，主要表现为跟随板块系统性回调。"
 
-    section_signals = f"""## 五、今日异常信号
+    section_signals = f"""## 五、今日关注信号
 
 {signals_md}
 """
@@ -861,6 +892,11 @@ def generate_daily_report(
     # ─────────────────────────────────────────
     # 第5部分：今日可能驱动因素（事件层）
     # ─────────────────────────────────────────
+    if events is not None:
+        events_trade_date = str(events.get('trade_date') or '')
+        if events_trade_date != date_file_str:
+            events = None
+
     if events is not None:
         announcements = events.get('company_announcements', [])
         company_news = events.get('company_news', [])
@@ -871,35 +907,23 @@ def generate_daily_report(
         co_news_status = events.get('company_news_status', 'error')
         sec_news_status = events.get('sector_news_status', 'error')
 
-        # ── 公告文案（按状态分支，严格区分"没拿到"和"确认没有"）──
+        # ── 公司层文案 ──
         if announcements:
             ann_lines = "\n".join(
                 f"- 📋 [{item['title']}]({item['url']})" if item.get('url') else f"- 📋 {item['title']}"
                 for item in announcements
             )
-            ann_block = f"**公司公告**\n\n{ann_lines}"
-        elif ann_status == 'ok' or ann_status == 'empty':
-            ann_block = "**公司公告**：今日无公告"
-        elif ann_status == 'unavailable':
-            ann_block = "**公司公告**：公告源暂不可用（v2.2.2 补充）"
-        elif ann_status == 'timeout':
-            ann_block = "**公司公告**：今日未获取到有效公告信息（请求超时）"
-        elif ann_status == 'permission_denied':
-            ann_block = "**公司公告**：今日未获取到有效公告信息（权限不足）"
-        else:
-            ann_block = "**公司公告**：今日未获取到有效公告信息"
-
-        # ── 公司新闻文案 ──
-        if company_news:
+            company_layer = f"**公司层**\n\n{ann_lines}"
+        elif company_news:
             co_lines = "\n".join(
                 f"- {item['title']}（{item.get('source','')} {item.get('datetime','')}）"
                 for item in company_news
             )
-            co_block = f"**公司新闻**\n\n{co_lines}"
-        elif co_news_status in ('ok', 'empty'):
-            co_block = "**公司新闻**：今日无相关新闻"
+            company_layer = f"**公司层**\n\n{co_lines}"
+        elif ann_status == 'ok' or ann_status == 'empty':
+            company_layer = "**公司层**：未见明确公司层新增催化。"
         else:
-            co_block = f"**公司新闻**：今日未获取到有效信息（{co_news_status}）"
+            company_layer = f"**公司层**：今日未获取到有效公司层信息（公告={ann_status}，新闻={co_news_status}）。"
 
         # ── 板块新闻文案 ──
         if sector_news:
@@ -907,36 +931,36 @@ def generate_daily_report(
                 f"- {item['title']}（{item.get('source','')} {item.get('datetime','')}）"
                 for item in sector_news
             )
-            sec_block = f"**板块新闻**\n\n{sec_lines}"
+            sector_layer = f"**板块层**\n\n{sec_lines}"
         elif sec_news_status in ('ok', 'empty'):
-            sec_block = "**板块新闻**：今日无相关板块新闻"
+            sector_layer = "**板块层**：未见明确板块层新增催化。"
         else:
-            sec_block = f"**板块新闻**：今日未获取到有效信息（{sec_news_status}）"
+            sector_layer = f"**板块层**：今日未获取到有效板块层信息（{sec_news_status}）。"
 
-        # ── 兜底文案（三类均无实质内容且状态可信时）──
-        all_confirmed_empty = (
-            not announcements and ann_status in ('ok', 'empty') and
-            not company_news and co_news_status in ('ok', 'empty') and
-            not sector_news and sec_news_status in ('ok', 'empty')
-        )
-        no_event_note = "\n\n> 今日未发现明确公司或板块事件催化。" if all_confirmed_empty else ""
+        if event_signal == "有明确催化":
+            event_conclusion = "今日存在一定事件配合，但价格表现仍以盘面验证为准。"
+        elif event_signal == "有弱催化":
+            event_conclusion = "今日存在一定事件扰动，但整体仍更多由板块联动与资金面主导。"
+        else:
+            event_conclusion = "今日更多由板块联动与资金面主导，未见明确事件催化。"
 
         section_events = f"""## 六、今日可能驱动因素
 
-> 事件信号：**{event_signal}**  
-> {event_summary}
+{company_layer}
 
-{ann_block}
+{sector_layer}
 
-{co_block}
-
-{sec_block}{no_event_note}
+> 总结：{event_conclusion}
 """
     else:
         # 事件层不可用（未运行或失败）
         section_events = """## 六、今日可能驱动因素
 
-> 事件层数据不可用（请运行 pipeline 完整流程或检查 daily_events.json）。
+**公司层**：今日未获取到有效公司层信息。
+
+**板块层**：今日未获取到有效板块层信息。
+
+> 总结：今日更多由板块联动与资金面主导。
 """
 
     # ─────────────────────────────────────────
@@ -970,17 +994,10 @@ def generate_daily_report(
 """
 
     # ─────────────────────────────────────────
-    # 第八节：股票池快照（v2.7 新增）
+    # 第八节：股票池快照（精简模式）
     # ─────────────────────────────────────────
     # 读取配置中的股票池分层
-    anchor_info = config.get('anchor', {})
-    anchor_name_pool = anchor_info.get('name', '铂力特')
-    
     core_universe = config.get('core_universe', [])
-    research_core = config.get('research_core', [])
-    extended_universe = config.get('extended_universe', [])
-    trading_candidates = config.get('trading_candidates', [])
-    research_candidates = config.get('research_candidates', [])
     
     # 整理各层股票列表
     def format_stock_list(stocks, max_show=5):
@@ -991,16 +1008,21 @@ def generate_daily_report(
             return " / ".join(names)
         return f"{' / '.join(names[:max_show])}...（共{len(names)}只）"
     
-    section_pool = f"""## 八、股票池快照
+    changelog = config.get("changelog", [])
+    latest_change_date = changelog[0].get("date") if changelog else None
+    report_trade_date = date_str
 
-- **anchor**：{anchor_name_pool}
-- **trading_core**：{format_stock_list(core_universe)}
-- **research_core**：{format_stock_list(research_core)}
-- **trading_candidates**：{format_stock_list(trading_candidates)}
-- **research_candidates**：{format_stock_list(research_candidates)}
-- **extended_watchlist**：{format_stock_list(extended_universe)}
+    if latest_change_date and latest_change_date == report_trade_date:
+        section_pool = f"""## 八、股票池快照
 
-> **计算口径说明**：当前板块均值、排名、rolling 只基于 **trading_core**（benchmark_included=true）计算；其他层仅用于研究或观察，不参与当前 benchmark。
+- **核心层**：{format_stock_list(core_universe)}
+
+> 其余层级维持既有结构。
+"""
+    else:
+        section_pool = """## 八、股票池快照
+
+> 股票池结构未发生变化。
 """
 
     # ─────────────────────────────────────────
@@ -1088,11 +1110,11 @@ def generate_daily_report(
     print(f"  综合信号  : {overall_signal_label}")
     print(f"  涨跌幅    : {fmt_pct(anchor_return)}  (板块: {fmt_pct(sector_avg_return)}, 相对: {fmt_pct(relative_strength)})")
     print(f"  成交额    : {fmt_amount(anchor_amount)}  ({fmt_multiple(amount_vs_5d_avg)} vs 5日均)")
-    print(f"  板块排名  : 涨跌幅 {fmt_rank(return_rank_in_sector, rank_total) if isinstance(rank_total, int) else 'N/A'}  |  成交额 {fmt_rank(amount_rank_in_sector, rank_total) if isinstance(rank_total, int) else 'N/A'}")
+    print(f"  板块位置  : 涨跌幅 {fmt_rank_natural(return_rank_in_sector, rank_total) if isinstance(rank_total, int) else 'N/A'}  |  成交额 {fmt_rank_natural(amount_rank_in_sector, rank_total) if isinstance(rank_total, int) else 'N/A'}")
     if abnormal_signals:
-        print(f"  异常信号  : {' | '.join(abnormal_signals)}")
+        print(f"  关注信号  : {' | '.join(abnormal_signals)}")
     else:
-        print(f"  异常信号  : 无")
+        print(f"  关注信号  : 无")
     if events is not None:
         print(f"  事件信号  : {events.get('event_signal_label', 'N/A')}")
     print("-" * 55)
