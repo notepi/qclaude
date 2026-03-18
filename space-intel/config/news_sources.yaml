@@ -1,0 +1,7 @@
+# 只放你感兴趣的新闻源链接。
+# 系统会自动识别来源等级、来源类型和抓取模式，
+# 并把结果写到 data/processed/news_sources_registry.json。
+
+sources:
+  - https://tushare.pro/news/cls
+  - https://tushare.pro/news/eastmoney

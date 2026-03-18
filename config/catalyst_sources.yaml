@@ -1,0 +1,11 @@
+# 新闻源配置
+# 用户可以在此添加自定义新闻源 URL
+
+sources:
+  - url: https://www.cls.cn/telegraph
+    name: 财联社电报
+    enabled: true
+
+  # - url: https://xxx.com/news
+  #   name: 用户自定义源
+  #   enabled: true
