@@ -1,0 +1,87 @@
+{
+  "trade_date": "20260317",
+  "anchor_code": "688333.SH",
+  "anchor_name": "铂力特",
+  "company_announcements": [],
+  "announcement_status": "empty",
+  "company_news": [],
+  "company_news_status": "empty",
+  "sector_news": [
+    {
+      "title": "西测测试携手三角防务等设立合资公司 助推陕西商业航天“补链”突围",
+      "datetime": "2026-03-17 17:04:36",
+      "source": "上海证券报·中国证券网",
+      "matched_keyword": "商业航天"
+    },
+    {
+      "title": "扭亏为盈驶入快车道，*ST铖昌乘商业航天东风起航",
+      "datetime": "2026-03-17 14:18:13",
+      "source": "证券时报网",
+      "matched_keyword": "商业航天"
+    },
+    {
+      "title": "中星试验李星：瞄准“华北规模最大”目标 加速建设商业航天共性试验平台",
+      "datetime": "2026-03-17 12:21:13",
+      "source": "上海证券报·中国证券网",
+      "matched_keyword": "商业航天"
+    }
+  ],
+  "sector_news_status": "ok",
+  "event_signal_label": "有弱催化",
+  "event_summary": "20260317：无铂力特公告，无公司新闻，3 条板块新闻；初步判断：有弱催化",
+  "events_list": [
+    {
+      "event_id": "aggregator__688333_SH__20260317__212ba0fe",
+      "event_type": "sector_news",
+      "source_type": "aggregator",
+      "source_name": "eastmoney",
+      "title": "西测测试携手三角防务等设立合资公司 助推陕西商业航天“补链”突围",
+      "url": "",
+      "published_at": "2026-03-17 17:04:36",
+      "trade_date": "20260317",
+      "status": "ok",
+      "anchor_code": "688333.SH",
+      "anchor_name": "铂力特",
+      "keyword_hits": [
+        "商业航天"
+      ],
+      "fetched_at": "2026-03-17 18:27:09"
+    },
+    {
+      "event_id": "aggregator__688333_SH__20260317__05e175ac",
+      "event_type": "sector_news",
+      "source_type": "aggregator",
+      "source_name": "eastmoney",
+      "title": "扭亏为盈驶入快车道，*ST铖昌乘商业航天东风起航",
+      "url": "",
+      "published_at": "2026-03-17 14:18:13",
+      "trade_date": "20260317",
+      "status": "ok",
+      "anchor_code": "688333.SH",
+      "anchor_name": "铂力特",
+      "keyword_hits": [
+        "商业航天"
+      ],
+      "fetched_at": "2026-03-17 18:27:09"
+    },
+    {
+      "event_id": "aggregator__688333_SH__20260317__1a065761",
+      "event_type": "sector_news",
+      "source_type": "aggregator",
+      "source_name": "eastmoney",
+      "title": "中星试验李星：瞄准“华北规模最大”目标 加速建设商业航天共性试验平台",
+      "url": "",
+      "published_at": "2026-03-17 12:21:13",
+      "trade_date": "20260317",
+      "status": "ok",
+      "anchor_code": "688333.SH",
+      "anchor_name": "铂力特",
+      "keyword_hits": [
+        "商业航天"
+      ],
+      "fetched_at": "2026-03-17 18:27:09"
+    }
+  ],
+  "error": null,
+  "generated_at": "2026-03-17 18:27:09"
+}
