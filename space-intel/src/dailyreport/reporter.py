@@ -58,6 +58,21 @@ def load_latest_metrics(data_path: str = None) -> Dict[str, Any]:
         signals = signals.tolist()
     latest['abnormal_signals'] = signals if signals else []
 
+    # v2.7 新增字段：确保 numpy array 转 list
+    for key in ['diagnosis_reasons', 'next_watch']:
+        val = latest.get(key, [])
+        if hasattr(val, 'tolist'):
+            val = val.tolist()
+        latest[key] = val if val else []
+
+    # signal_breakdown 内的 array 转 list
+    signal_breakdown = latest.get('signal_breakdown', {})
+    if isinstance(signal_breakdown, dict):
+        for k, v in signal_breakdown.items():
+            if hasattr(v, 'tolist'):
+                signal_breakdown[k] = v.tolist()
+        latest['signal_breakdown'] = signal_breakdown
+
     return latest
 
 
@@ -224,14 +239,14 @@ def build_rolling_section(
         today_relative_strength: 今天的相对强弱（用于追加到序列末尾）
     """
     if rolling is None:
-        return """## 二、近5日状态
+        return """## 四、近5日状态
 
 > 连续观察层数据不可用（首次运行或 archive 数据不足）。
 """
 
     available = rolling.get("available_days", 0)
     if available < 2:
-        return f"""## 二、近5日状态
+        return f"""## 四、近5日状态
 
 > 历史数据不足（当前仅 {available} 日归档），近5日状态暂不可用。
 """
@@ -247,27 +262,55 @@ def build_rolling_section(
     rs_mean = rolling.get("rs_5d_mean")
 
     # 把今天的值追加到序列末尾（rolling 读取的是历史数据，不包含今天）
+    # 然后取最近5天（包含今天）
     if today_relative_strength is not None:
         rs_series = list(rs_series) + [today_relative_strength]
     if today_amount_vs_5d_avg is not None:
         avg_series = list(avg_series) + [today_amount_vs_5d_avg]
+    # 取最近5天
+    rs_series = rs_series[-5:] if len(rs_series) > 5 else rs_series
+    avg_series = avg_series[-5:] if len(avg_series) > 5 else avg_series
+    # 更新 n 为实际天数
+    n = len(rs_series)
 
-    # 连续性数字
-    rs_out_days   = rolling.get("rs_outperform_days_5d", 0) or 0
-    rs_consec_out = rolling.get("rs_consecutive_outperform", 0) or 0
-    rs_consec_und = rolling.get("rs_consecutive_underperform", 0) or 0
+    # 追加今天值后，重新计算连续性统计
+    n = len(rs_series)
+    rs_out_days = sum(1 for v in rs_series if v is not None and v > 0)
+    rs_consec_out = 0
+    for v in reversed(rs_series):
+        if v is not None and v > 0:
+            rs_consec_out += 1
+        else:
+            break
+    rs_consec_und = 0
+    for v in reversed(rs_series):
+        if v is not None and v <= 0:
+            rs_consec_und += 1
+        else:
+            break
 
-    vol_expand_days  = rolling.get("volume_expand_days_5d", 0) or 0
-    vol_consec_exp   = rolling.get("volume_consecutive_expand", 0) or 0
-    vol_consec_shr   = rolling.get("volume_consecutive_shrink", 0) or 0
-    high_days        = rolling.get("amount_20d_high_days_5d", 0) or 0
+    # 成交额连续性（放量/缩量）
+    vol_expand_days = sum(1 for v in avg_series if v is not None and v > 1.0)
+    vol_consec_exp = 0
+    for v in reversed(avg_series):
+        if v is not None and v > 1.0:
+            vol_consec_exp += 1
+        else:
+            break
+    vol_consec_shr = 0
+    for v in reversed(avg_series):
+        if v is not None and v < 1.0:
+            vol_consec_shr += 1
+        else:
+            break
 
-    # v2.5C P1：主力资金连续性
+    # 主力资金连续性（保留原有逻辑，因为 daily_metrics 中有今天的资金数据）
     mf_inflow_days    = rolling.get("mf_inflow_days_5d")
     mf_consec_in      = rolling.get("mf_consecutive_inflow", 0) or 0
     mf_consec_out     = rolling.get("mf_consecutive_outflow", 0) or 0
     mf_5d_mean        = rolling.get("mf_5d_mean")
     cf_trend_label    = rolling.get("capital_flow_trend_label", "资金数据不足")
+    high_days         = rolling.get("amount_20d_high_days_5d", 0) or 0
 
     # 资金连续性小块（有数据才显示）
     if mf_inflow_days is not None:
@@ -320,26 +363,41 @@ def build_rolling_section(
             parts.append(s + "（今日）" if i == len(series)-1 else s)
         return " → ".join(parts)
 
-    return f"""## 二、近{n}日状态
+    # v2.6: 压缩近5日结构，合并到一行摘要
+    # 计算更准确的描述
+    if rs_out_days >= 3 and rs_mean is not None and rs_mean > 0:
+        structure_desc = "结构偏强"
+    elif rs_out_days >= 3 and rs_mean is not None and rs_mean <= 0:
+        structure_desc = "胜率尚可，但幅度偏弱"
+    elif rs_out_days < 3 and rs_mean is not None and rs_mean > 0:
+        structure_desc = "幅度尚可，但胜率偏低"
+    else:
+        structure_desc = "结构偏弱"
 
-| 维度 | 标签 |
-|------|------|
-| 价格趋势 | {price_label} |
-| 量能趋势 | {volume_label} |
-| **综合动量** | **{m_emoji} {momentum_label}** |
+    # 量能描述
+    if vol_expand_days >= 3:
+        volume_desc = "放量明显"
+    elif vol_consec_shr >= 2:
+        volume_desc = "连续缩量"
+    else:
+        volume_desc = "量能平稳"
 
-**价格连续性**：跑赢板块 {rs_out_days}/{n} 日 | 连续跑赢 {rs_consec_out} 日 | 连续跑输 {rs_consec_und} 日
+    # 资金描述
+    if mf_inflow_days is not None:
+        if mf_inflow_days >= 3:
+            capital_desc = "资金面偏强"
+        elif mf_inflow_days >= 2:
+            capital_desc = "资金面有改善迹象"
+        else:
+            capital_desc = "资金面偏弱"
+    else:
+        capital_desc = "资金数据缺失"
 
-**量能连续性**：放量 {vol_expand_days}/{n} 日 | 连续放量 {vol_consec_exp} 日 | 连续缩量 {vol_consec_shr} 日 | 创20日新高 {high_days} 次
-{capital_block}
+    return f"""## 四、近{n}日结构
 
-**相对强弱序列**：{_rs_seq(rs_series)}
+跑赢板块 **{rs_out_days}/{n} 日**，平均相对强弱 **{rs_mean_str}**，属于"{structure_desc}"；量能 **{volume_desc}**；{capital_desc}。
 
-**成交额倍数序列**：{_avg_seq(avg_series)}
-
-> {trend_summary}
-
-> 摘要：{rolling_summary}
+相对强弱序列：{_rs_seq(rs_series)}
 """
 
 
@@ -465,6 +523,7 @@ def generate_daily_report(
     price_capital_relation_label = metrics.get('price_capital_relation_label', 'N/A')
     retail_order_net             = metrics.get('retail_order_net')
     big_order_ratio              = metrics.get('big_order_ratio')
+    net_mf_amount                = metrics.get('net_mf_amount')
 
     # v2.6 新增 research_core 字段
     research_avg_return        = metrics.get('research_avg_return')
@@ -513,106 +572,18 @@ def generate_daily_report(
 """
 
     # ─────────────────────────────────────────
-    # 第1部分：今日结论 + 诊断层 v1
+    # 第1部分：今日结论（v2.7 从数据线读取）
     # ─────────────────────────────────────────
-    
-    # === 诊断层 v1 ===
-    diagnosis_reasons = []  # 主诊断原因
-    consistency_note = ""   # 一致性判断
-    next_watch = ""        # 下一步关注
-    
-    # 1. 主诊断：弱/强 的原因（最多2条）
-    # 板块整体判断
-    sector_weak = sector_avg_return is not None and sector_avg_return < -0.02  # 板块跌超2%
-    stock_weak = relative_strength is not None and relative_strength < 0  # 跑输板块
-    stock_strong = relative_strength is not None and relative_strength > 0  # 跑赢板块
-    
-    # 资金判断
-    capital_weak = capital_flow_label is not None and ("偏空" in capital_flow_label or "流出" in capital_flow_label)
-    capital_strong = capital_flow_label is not None and ("偏多" in capital_flow_label or "流入" in capital_flow_label)
-    
-    # 放量下跌判断
-    volume_up = volume_strength_label == "强"
-    price_down = anchor_return is not None and anchor_return < 0
-    volume_price_weak = volume_up and price_down
-    
-    # 生成主诊断
-    if overall_signal_label and "弱" in overall_signal_label:
-        if sector_weak and stock_weak:
-            diagnosis_reasons.append("板块整体下跌，个股跌幅更大")
-        elif sector_weak:
-            diagnosis_reasons.append("板块整体回调")
-        elif stock_weak:
-            diagnosis_reasons.append("个股走势弱于板块")
-        
-        if capital_weak:
-            diagnosis_reasons.append("主力资金净流出")
-        
-        if volume_price_weak:
-            diagnosis_reasons.append("放量下跌，短线承压")
-    
-    elif overall_signal_label and "强" in overall_signal_label:
-        if sector_weak and stock_strong:
-            diagnosis_reasons.append("板块下跌中逆势走强")
-        elif stock_strong:
-            diagnosis_reasons.append("走势强于板块")
-        
-        if capital_strong:
-            diagnosis_reasons.append("主力资金净流入")
-    
-    # 限制输出1-2条
-    diagnosis_reasons = diagnosis_reasons[:2]
-    
-    # 2. 一致性判断
-    momentum = rolling.get('momentum_label', '') if rolling else ''
-    if rolling:
-        rs_5d = rolling.get('rs_5d_mean', 0) or 0
-        
-        # 今日弱 vs 近5日强
-        if overall_signal_label and "弱" in overall_signal_label:
-            if momentum in ["量价齐升", "价强量稳"] or rs_5d > 0.01:
-                consistency_note = "短线回撤，但近5日仍维持强势结构"
-            elif momentum in ["量价齐弱", "放量下跌"]:
-                consistency_note = "跌势延续，弱势结构确认"
-            else:
-                consistency_note = "与近5日趋势基本一致"
-        
-        # 今日强 vs 近5日弱
-        elif overall_signal_label and "强" in overall_signal_label:
-            if momentum in ["量价齐弱", "放量下跌"] or rs_5d < -0.01:
-                consistency_note = "单日反弹，需观察持续性"
-            elif momentum in ["量价齐升", "价强量稳"]:
-                consistency_note = "强势延续，趋势向好"
-            else:
-                consistency_note = "与近5日趋势基本一致"
-    
-    # 3. 下一步关注（只输出1条）
-    if capital_weak:
-        next_watch = "明日主力资金是否回流"
-    elif sector_weak:
-        next_watch = "板块情绪是否企稳"
-    elif momentum and "弱" in momentum:
-        next_watch = "近5日趋势是否改善"
-    elif rolling and rolling.get('capital_flow_trend_label'):
-        if "流出" in rolling['capital_flow_trend_label']:
-            next_watch = "资金面是否转暖"
-    
-    # 当前状态
-    if overall_signal_label == "强":
-        current_state = "整体偏强，价格与量能维持较好配合。"
-    elif overall_signal_label == "中性偏强":
-        current_state = "整体偏强，但仍需继续确认持续性。"
-    elif overall_signal_label == "中性":
-        current_state = "整体中性，暂未形成明确方向。"
-    elif overall_signal_label == "中性偏弱":
-        current_state = "整体偏弱，短线仍处于回撤与消化阶段。"
-    elif overall_signal_label == "弱":
-        current_state = "整体偏弱，价格与资金面仍有压力。"
-    else:
-        current_state = "当前状态待进一步确认。"
 
-    primary_reasons = "；".join(diagnosis_reasons) if diagnosis_reasons else "主要表现为跟随板块波动，暂未见独立驱动。"
-    next_watch = next_watch or "成交量与资金流向变化"
+    # 从数据线读取诊断字段
+    diagnosis_label = metrics.get("diagnosis_label", "状态待确认")
+    diagnosis_reasons = metrics.get("diagnosis_reasons", ["数据不足"])
+    next_watch_list = metrics.get("next_watch", ["量能与资金流向变化"])
+
+    # 格式化
+    current_state = diagnosis_label
+    primary_reasons = "、".join(diagnosis_reasons[:3]) if diagnosis_reasons else "跟随板块波动"
+    next_watch = "、".join(next_watch_list[:3])
 
     section_conclusion = f"""## 一、今日结论
 
@@ -621,112 +592,51 @@ def generate_daily_report(
 - **下一步观察**：{next_watch}
 """
 
-    # ─────────────────────────────────────────
-    # 交易解释层 v2.0 增强（内联简化版）
-    # ─────────────────────────────────────────
-    
-    # 生成状态解释（只做证据拆解，不重复结论）
-    explain_lines = []
-
-    drivers = []
-    
-    # 价格维度
-    if price_strength_label == "弱":
-        if relative_strength is not None and relative_strength < -0.01:
-            drivers.append(f"价格走弱，跑输板块 {relative_strength:.2%}")
-        else:
-            drivers.append("价格走弱，但相对板块尚可")
-    elif price_strength_label == "强":
-        if relative_strength is not None and relative_strength > 0.01:
-            drivers.append(f"价格强势，跑赢板块 {relative_strength:.2%}")
-        else:
-            drivers.append("价格相对强势")
-    
-    # 资金维度
-    cf_trend = rolling.get('capital_flow_trend_label', '') if rolling else ''
-    if cf_trend and "流出" in cf_trend:
-        drivers.append("主力资金持续流出")
-    elif cf_trend and "流入" in cf_trend:
-        drivers.append("主力资金流入")
-    
-    # 量能维度
-    if volume_strength_label == "强" and price_strength_label == "弱":
-        drivers.append("放量下跌，抛压较重")
-    elif volume_strength_label == "弱" and price_strength_label == "弱":
-        drivers.append("缩量下跌，抛压减轻")
-    
-    # 动量维度
-    if momentum_label == "价强量稳":
-        if overall_signal_label in {"中性偏弱", "弱"}:
-            drivers.append("短期回撤，但中期结构未明显失真")
-        else:
-            drivers.append("近5日结构尚稳，量价关系未见明显破坏")
-    elif momentum_label == "量价齐升":
-        if overall_signal_label in {"中性偏弱", "弱"}:
-            drivers.append("近5日结构尚未完全破坏")
-        else:
-            drivers.append("近5日结构偏强，量价仍有配合")
-    elif momentum_label == "量价齐弱":
-        drivers.append("量价齐弱，动量不足")
-    elif momentum_label == "放量下跌":
-        drivers.append("放量回撤，短线承压仍较明显")
-    
-    # 研究层分化
+    # 保留研究层分化提示（压缩到一行）
+    research_note = ""
     if research_relative_strength is not None and relative_strength is not None:
-        if abs(research_relative_strength - relative_strength) > 0.005:
-            if research_relative_strength > relative_strength:
-                drivers.append(f"研究层相对更强（差 {research_relative_strength - relative_strength:.2%}），关注华曙高科/中天火箭走势")
+        rs_diff = research_relative_strength - relative_strength
+        if abs(rs_diff) > 0.005:
+            if rs_diff > 0:
+                research_note = f"研究层较交易层强 {rs_diff:.2%}，产业链对比占优"
             else:
-                drivers.append(f"研究层相对更弱（差 {relative_strength - research_relative_strength:.2%}），铂力特在核心环节占优")
-    
-    if not drivers:
-        drivers.append("暂无额外证据补充")
-    
-    explain_lines.append("### 状态解释")
-    for driver in drivers[:4]:
-        explain_lines.append(f"- {driver}")
+                research_note = f"研究层较交易层弱 {abs(rs_diff):.2%}，铂力特在核心环节表现更优"
 
-    explanation_str = "\n".join(explain_lines)
-    section_conclusion = section_conclusion.rstrip() + f"\n\n{explanation_str}\n"
+    if research_note:
+        section_conclusion = section_conclusion.rstrip() + f"\n\n> {research_note}，但短线定价仍主要受交易层和资金面驱动。\n"
 
     # ─────────────────────────────────────────
-    # 评分层快照（翻译成人话）
-    score_snapshot = get_score_snapshot(
-        overall_signal_label=overall_signal_label,
-        price_strength_label=price_strength_label,
-        volume_strength_label=volume_strength_label,
-        momentum_label=momentum_label,
-        capital_flow_trend_label=rolling.get("capital_flow_trend_label", "") if rolling else "",
-        capital_flow_label=capital_flow_label,
-        rolling=rolling,
-        relative_strength=relative_strength,
-        return_rank_in_sector=return_rank_in_sector,
-    )
-    section_conclusion = section_conclusion.rstrip() + score_snapshot
+    # 第2部分：近5日状态（v2.7 从数据线读取）
+    # ─────────────────────────────────────────
+    rolling_summary_text = metrics.get("rolling_summary_text", "数据不足")
+    rs_5d_series = rolling.get("rs_5d_series", []) if rolling else []
 
-    # 反抽观察层 v1.0
-    # ─────────────────────────────────────────
-    rebound_section = get_rebound_section(
-        overall_signal_label=overall_signal_label,
-        price_strength_label=price_strength_label,
-        volume_strength_label=volume_strength_label,
-        capital_flow_trend_label=rolling.get("capital_flow_trend_label", "") if rolling else "",
-        relative_strength=relative_strength,
-        anchor_return=anchor_return,
-        momentum_label=momentum_label,
-        price_trend_label=rolling.get("price_trend_label", "") if rolling else "",
-    )
-    section_conclusion = section_conclusion.rstrip() + rebound_section
+    # 追加今日值到序列末尾
+    if rs_5d_series and relative_strength is not None:
+        rs_5d_series = list(rs_5d_series) + [relative_strength]
+    rs_5d_series = rs_5d_series[-5:] if len(rs_5d_series) > 5 else rs_5d_series
 
-    # ─────────────────────────────────────────
-    # 第2部分：近5日状态（连续观察层）
-    # ─────────────────────────────────────────
-    section_rolling = build_rolling_section(
-        rolling,
-        anchor_name,
-        today_amount_vs_5d_avg=amount_vs_5d_avg,
-        today_relative_strength=relative_strength,
-    )
+    # 格式化序列
+    def _fmt_rs_series(series):
+        parts = []
+        for v in series:
+            if v is None:
+                parts.append("N/A")
+            else:
+                sign = "+" if v >= 0 else ""
+                parts.append(f"{sign}{v * 100:.1f}%")
+        return " → ".join(parts)
+
+    rs_series_str = _fmt_rs_series(rs_5d_series)
+    if rs_5d_series:
+        rs_series_str += "（今日）"
+
+    section_rolling = f"""## 四、近5日结构
+
+{rolling_summary_text}
+
+相对强弱序列：{rs_series_str}
+"""
 
     # ─────────────────────────────────────────
     # 第3部分：核心指标
@@ -738,7 +648,6 @@ def generate_daily_report(
     pb            = metrics.get('pb')
     total_mv      = metrics.get('total_mv')
     turnover_rate = metrics.get('turnover_rate')
-    net_mf_amount = metrics.get('net_mf_amount')
     buy_elg_vol   = metrics.get('buy_elg_vol')
     sell_elg_vol  = metrics.get('sell_elg_vol')
 
@@ -759,212 +668,112 @@ def generate_daily_report(
         if v is None: return "N/A"
         return f"{v:.0f} 手"
 
-    # 基本面行（有数据才显示）
-    basic_rows = ""
-    if pe_ttm is not None:
-        basic_rows += f"| PE_TTM | {pe_ttm:.1f} |\n"
-    if pb is not None:
-        basic_rows += f"| PB | {pb:.2f} |\n"
-    if total_mv is not None:
-        basic_rows += f"| 总市值 | {fmt_mv(total_mv)} |\n"
-    if turnover_rate is not None:
-        basic_rows += f"| 换手率 | {turnover_rate:.2f}% |\n"
-
-    # 资金结构行（有数据才显示）
-    flow_rows = ""
-    if net_mf_amount is not None:
-        flow_rows += f"| 主力净流入 | {fmt_flow(net_mf_amount)} |\n"
-    if buy_elg_vol is not None and sell_elg_vol is not None:
-        net_elg = buy_elg_vol - sell_elg_vol
-        flow_rows += f"| 超大单净量 | {fmt_vol(net_elg)} |\n"
-    if retail_order_net is not None:
-        # 根据正负决定显示"净流入"还是"净流出"
-        if retail_order_net >= 0:
-            flow_rows += f"| 中小资金净流入 | {fmt_flow(retail_order_net)} |\n"
-        else:
-            # 净流出时，显示绝对值，不带符号
-            flow_rows += f"| 中小资金净流出 | {abs(retail_order_net):.0f} 万元 |\n"
-    if big_order_ratio is not None:
-        flow_rows += f"| 大资金占比 | {big_order_ratio*100:.1f}% |\n"
-
-    capital_summary = build_capital_summary(metrics)
-    capital_summary_md = f"\n> 💡 {capital_summary}" if capital_summary else ""
-    section_metrics = f"""## 三、核心指标
+    # v2.6: 精简核心指标（6个关键指标）
+    section_metrics = f"""## 二、证据板
 
 | 指标 | 数值 |
 |------|------|
-| {anchor_name} 涨跌幅 | {fmt_pct(anchor_return)} |
-| 板块平均涨跌幅 | {fmt_pct(sector_avg_return)} |
+| 涨跌幅 | {fmt_pct(anchor_return)} |
+| 板块均值 | {fmt_pct(sector_avg_return)} |
 | 相对强弱 | {fmt_pct(relative_strength)} |
-| 成交额 | {fmt_amount(anchor_amount)} |
-| 成交额创20日新高 | {amount_20d_str} |
-| 成交额 / 5日均值 | {fmt_multiple(amount_vs_5d_avg)} |
-{basic_rows}{flow_rows}
-{capital_summary_md}
+| 成交额/5日均值 | {fmt_multiple(amount_vs_5d_avg)} |
+| 主力净流入 | {fmt_flow(net_mf_amount)} |
+| 换手率 | {turnover_rate:.2f}% |
 """
 
     # ─────────────────────────────────────────
-    # 第3.5部分：估值分析（v3.1 新增）
+    # 资金流向（v2.7 从数据线读取）
     # ─────────────────────────────────────────
-    def fmt_val(v):
-        """估值格式化"""
-        if v is None: return "N/A"
-        return f"{v:.1f}"
+    capital_summary_text = metrics.get("capital_summary_text", "数据缺失")
+    elg_action_text = metrics.get("elg_action_text", "数据缺失")
+    participation_text = metrics.get("participation_text", "数据缺失")
+    capital_conclusion_text = metrics.get("capital_conclusion_text", "数据缺失")
 
-    def fmt_pct_val(v):
-        """百分比格式化（用于分位）"""
-        if v is None: return "N/A"
-        return f"{v:.0f}%"
+    section_capital_flow = f"""## 三、资金流向
 
-    # 只有当有估值数据时才显示表格
-    has_valuation_data = any([
-        pe_ttm is not None, pb is not None, sector_pe_mean is not None,
-        pe_percentile_60d is not None
-    ])
-
-    if has_valuation_data:
-        # 构建估值分析表格
-        valuation_rows = []
-
-        # PE 行
-        if pe_ttm is not None or sector_pe_mean is not None:
-            pe_val = fmt_val(pe_ttm) if pe_ttm else "N/A"
-            sector_pe = fmt_val(sector_pe_mean) if sector_pe_mean else "N/A"
-            pe_pos = pe_sector_position if pe_sector_position else "N/A"
-            pe_pct = f"{fmt_pct_val(pe_percentile_60d)} ({pe_percentile_label})" if pe_percentile_60d is not None else "N/A"
-            valuation_rows.append(f"| PE_TTM | {pe_val} | {sector_pe} | {pe_pos} | {pe_pct} |")
-
-        # PB 行
-        if pb is not None or sector_pb_mean is not None:
-            pb_val = fmt_val(pb) if pb else "N/A"
-            sector_pb = fmt_val(sector_pb_mean) if sector_pb_mean else "N/A"
-            pb_pos = pb_sector_position if pb_sector_position else "N/A"
-            pb_pct = f"{fmt_pct_val(pb_percentile_60d)} ({pb_percentile_label})" if pb_percentile_60d is not None else "N/A"
-            valuation_rows.append(f"| PB | {pb_val} | {sector_pb} | {pb_pos} | {pb_pct} |")
-
-        # PS 行（只有当有 PS 数据时才显示）
-        ps_ttm = metrics.get('ps_ttm')
-        if ps_ttm is not None or sector_ps_mean is not None:
-            ps_val = fmt_val(ps_ttm) if ps_ttm else "N/A"
-            sector_ps = fmt_val(sector_ps_mean) if sector_ps_mean else "N/A"
-            ps_pos = ps_sector_position if ps_sector_position else "N/A"
-            ps_pct = f"{fmt_pct_val(ps_percentile_60d)} ({ps_percentile_label})" if ps_percentile_60d is not None else "N/A"
-            valuation_rows.append(f"| PS_TTM | {ps_val} | {sector_ps} | {ps_pos} | {ps_pct} |")
-
-        valuation_table = "\n".join(valuation_rows)
-        valuation_detail_md = f"（{valuation_detail}）" if valuation_detail else ""
-
-        section_valuation = f"""
-## 估值分析
-
-| 指标 | 当前值 | 板块均值 | 板块位置 | 近60日分位 |
-|------|--------|----------|----------|------------|
-{valuation_table}
-
-> 综合估值: {valuation_label}{valuation_detail_md}
+- **主力总体**：{capital_summary_text}
+- **超大单行为**：{elg_action_text}
+- **大资金参与度**：{participation_text}
+- **结论**：{capital_conclusion_text}
 """
+
+    # ─────────────────────────────────────────
+    # 第5部分：估值与位置（v2.6 合并）
+    # ─────────────────────────────────────────
+    # 估值简化描述
+    if valuation_detail:
+        # 将"估值偏低"改为更准确的说法
+        valuation_desc = valuation_detail.replace("估值偏低", "相对估值低位")
+        # 加上"绝对估值仍不算低"的提示
+        if "低位" in valuation_desc and "绝对" not in valuation_desc:
+            valuation_desc += "，绝对估值仍不算低"
     else:
-        section_valuation = ""
+        valuation_desc = "估值数据缺失"
 
-    # ─────────────────────────────────────────
-    # 第4部分：板块位置
-    # ─────────────────────────────────────────
+    # 板块位置
     rank_total = sector_total_size if isinstance(sector_total_size, int) else "N/A"
-
     def fmt_rank_natural(rank: Optional[int], total: int) -> str:
         if rank is None or not isinstance(total, int):
             return "N/A"
         if rank == 1:
-            return f"{total}只样本中居首位"
+            return f"第1/{total}名"
         if rank == total:
-            return f"{total}只样本中居末位"
-        mid = (total + 1) / 2
-        if rank < mid:
-            return f"{total}只样本中位列中间偏前位置（第{rank}位）"
-        if rank > mid:
-            return f"{total}只样本中位列中间偏后位置（第{rank}位）"
-        return f"{total}只样本中位列中间位置（第{rank}位）"
+            return f"第{total}/{total}名（末位）"
+        return f"第{rank}/{total}名"
 
-    section_sector = f"""## 四、板块位置
+    return_rank_str = fmt_rank_natural(return_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"
+    amount_rank_str = fmt_rank_natural(amount_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"
 
-| 维度 | 排名 |
-|------|------|
-| 涨跌幅位置 | {fmt_rank_natural(return_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"} |
-| 成交额位置 | {fmt_rank_natural(amount_rank_in_sector, rank_total) if isinstance(rank_total, int) else "N/A"} |
+    section_valuation_position = f"""## 五、估值与位置
+
+**估值**：{valuation_desc}
+**板块位置**：涨跌幅 {return_rank_str} | 成交额 {amount_rank_str}
 """
 
     # ─────────────────────────────────────────
-    # 第5部分：今日关注信号
+    # 第6部分：今日关键信号（v2.7 从数据线读取）
     # ─────────────────────────────────────────
-    # 合并行情信号 + 资金结构背离信号
-    all_signals = list(abnormal_signals)
+    signal_breakdown = metrics.get("signal_breakdown", {})
+    abnormal_list = signal_breakdown.get("abnormal", [])
+    positive_list = signal_breakdown.get("positive", [])
+    risk_list = signal_breakdown.get("risk", [])
 
-    # 价格资金背离信号（v2.5B.1）
-    divergence_signals = {"上涨背离", "下跌背离"}
-    if price_capital_relation_label in divergence_signals:
-        all_signals.append(f"价格资金背离：{price_capital_relation_label}")
+    section_signals = f"""## 六、今日关键信号
 
-    benign_rank_signals = {"涨幅位居板块前二", "成交额位居板块前二"}
-    has_material_signal = any(sig not in benign_rank_signals for sig in all_signals)
-
-    if all_signals and has_material_signal:
-        signals_md = "\n".join(f"- ⚡ {sig}" for sig in all_signals)
-    else:
-        # 根据实际市场状态动态生成描述
-        if sector_avg_return is not None and sector_avg_return > 0:
-            if relative_strength is not None and relative_strength > 0:
-                signals_md = "暂无显著异常，跟随板块上涨，表现略强于板块。"
-            elif relative_strength is not None and relative_strength < 0:
-                signals_md = "暂无显著异常，跟随板块上涨，但表现弱于板块。"
-            else:
-                signals_md = "暂无显著异常，跟随板块上涨。"
-        elif sector_avg_return is not None and sector_avg_return < 0:
-            if relative_strength is not None and relative_strength > 0:
-                signals_md = "暂无显著异常，板块回调中逆势走强。"
-            elif relative_strength is not None and relative_strength < 0:
-                signals_md = "暂无显著异常，跟随板块回调。"
-            else:
-                signals_md = "暂无显著异常，跟随板块波动。"
-        else:
-            signals_md = "暂无显著异常，走势平稳。"
-
-    section_signals = f"""## 五、今日关注信号
-
-{signals_md}
+- **异常**：{"、".join(abnormal_list) if abnormal_list else "无"}
+- **积极**：{"、".join(positive_list) if positive_list else "无"}
+- **风险**：{"、".join(risk_list) if risk_list else "无"}
 """
 
     # ─────────────────────────────────────────
-    # 第六节：研究层对比（v2.6 新增）
+    # 第7部分：明日观察清单（v2.7 从数据线读取）
+    # ─────────────────────────────────────────
+    next_watch_list = metrics.get("next_watch", ["量能与资金流向变化"])
+    watch_md = "\n".join(f"- {item}" for item in next_watch_list[:4])
+
+    section_watchlist = f"""## 七、明日观察清单
+
+{watch_md if watch_md else "- 无特殊观察项"}
+"""
+
+    # ─────────────────────────────────────────
+    # 第八节：研究层对比（v2.6 简化）
     # ─────────────────────────────────────────
     if research_avg_return is not None and research_relative_strength is not None:
-        # 判断差异方向
-        rs_diff = research_relative_strength - relative_strength
-        if abs(rs_diff) < 0.001:
-            diff_note = "两个视角结论一致，说明铂力特在交易层和研究层的相对表现同步。"
-        elif rs_diff < -0.005:
-            diff_note = f"研究层视角下铂力特更弱（差 {abs(rs_diff):.2%}），通常意味着华曙高科/中天火箭等研究对标近期走势更强，需关注是否存在独立催化（如设备订单/发射计划）导致分化。"
-        elif rs_diff > 0.005:
-            diff_note = f"研究层视角下铂力特更强（差 {rs_diff:.2%}），说明研究对标近期跑输，铂力特在产业链核心环节的表现相对占优。"
-        else:
-            diff_note = "两个视角略有差异，但方向一致，属正常波动范围。"
-
-        section_research = f"""## 六、研究层对比
+        section_research = f"""## 八、研究层对比
 
 | 视角 | 板块均值 | 相对强弱 |
 |:---|:---:|:---:|
-| trading_core（交易层） | {fmt_pct(sector_avg_return)} | {fmt_pct(relative_strength)} |
-| research_core（研究层） | {fmt_pct(research_avg_return)} | {fmt_pct(research_relative_strength)} |
+| 交易层 | {fmt_pct(sector_avg_return)} | {fmt_pct(relative_strength)} |
+| 研究层 | {fmt_pct(research_avg_return)} | {fmt_pct(research_relative_strength)} |
 
-> **解读**：{diff_note}
+> 注：研究层对比说明产业链中期相对位次，但短线定价仍主要受交易层和资金面驱动。
 """
     else:
-        section_research = """## 六、研究层对比
-
-> 研究层数据暂不可用（请检查 stocks.yaml 是否配置 research_core 或运行完整 pipeline）。
-"""
+        section_research = ""
 
     # ─────────────────────────────────────────
-    # 第八节：股票池快照（精简模式）
+    # 第九节：股票池快照（精简模式）
     # ─────────────────────────────────────────
     # 读取配置中的股票池分层
     core_universe = config.get('core_universe', [])
@@ -983,14 +792,14 @@ def generate_daily_report(
     report_trade_date = date_str
 
     if latest_change_date and latest_change_date == report_trade_date:
-        section_pool = f"""## 七、股票池快照
+        section_pool = f"""## 九、股票池快照
 
 - **核心层**：{format_stock_list(core_universe)}
 
 > 其余层级维持既有结构。
 """
     else:
-        section_pool = """## 七、股票池快照
+        section_pool = """## 九、股票池快照
 
 > 股票池结构未发生变化。
 """
@@ -1024,14 +833,14 @@ def generate_daily_report(
         else:
             review_content = "\n".join(review_lines)
 
-        section_review = f"""## 八、股票池复审提醒
+        section_review = f"""## 十、股票池复审提醒
 
 {review_content}
 
 > 共 {review_summary['total_stocks']} 只标的，{review_summary['due_count']} 只需复审，{review_summary['upcoming_count']} 只即将到期
 """
     except Exception as e:
-        section_review = f"""## 八、股票池复审提醒
+        section_review = f"""## 十、股票池复审提醒
 
 > 复审模块加载失败: {e}
 """
@@ -1045,17 +854,18 @@ def generate_daily_report(
 
 {section_panel}
 {section_conclusion}
-{section_rolling}
 {section_metrics}
-{section_valuation}
-{section_sector}
+{section_capital_flow}
+{section_rolling}
+{section_valuation_position}
 {section_signals}
+{section_watchlist}
 {section_research}
 {section_pool}
 {section_review}
 ---
 
-*报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | v2.5 | 股票池版本: {universe_version}*
+*报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | v2.7 | 股票池版本: {universe_version}*
 """
 
     # 保存报告
@@ -1075,7 +885,7 @@ def generate_daily_report(
 
     # 控制台摘要
     print("=" * 55)
-    print(f"  {anchor_name}每日复盘 - {date_str}  [v2.5]")
+    print(f"  {anchor_name}每日复盘 - {date_str}  [v2.7]")
     print("=" * 55)
     print(f"  综合信号  : {overall_signal_label}")
     print(f"  涨跌幅    : {fmt_pct(anchor_return)}  (板块: {fmt_pct(sector_avg_return)}, 相对: {fmt_pct(relative_strength)})")

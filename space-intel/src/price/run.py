@@ -58,7 +58,8 @@ def main():
         return 1
 
     # Step 5: 连续观察层
-    print("\n[Step 5/7] 计算连续观察指标...")
+    print("\n[Step 5/8] 计算连续观察指标...")
+    rolling = None  # 初始化
     try:
         from src.price.rolling_analyzer import compute_rolling_metrics
         rolling = compute_rolling_metrics()
@@ -70,7 +71,7 @@ def main():
         print(f"[WARN] 连续观察层失败（不影响主流程）: {e}")
 
     # Step 6: 评分层
-    print("\n[Step 6/7] 计算评分层...")
+    print("\n[Step 6/8] 计算评分层...")
     try:
         from src.price.score_layer import load_archive_metrics, add_score_to_df
         from src.shared.storage import Storage
@@ -79,15 +80,50 @@ def main():
         archive_df = load_archive_metrics()
         if not archive_df.empty:
             scored_df = add_score_to_df(archive_df)
-            analytics_path = storage.get_analytics_path("scored_metrics.parquet")
+            analytics_path = storage.analytics_dir / "scored_metrics.parquet"
             scored_df.to_parquet(analytics_path, index=False)
             latest = scored_df.iloc[-1]
             print(f"[INFO] 评分完成: {latest.get('signal_rating', 'N/A')}")
     except Exception as e:
         print(f"[WARN] 评分层失败（不影响主流程）: {e}")
 
-    # Step 7: 反抽观察层
-    print("\n[Step 7/7] 计算反抽观察...")
+    # Step 7: 诊断层
+    print("\n[Step 7/8] 计算诊断层...")
+    try:
+        from src.price.diagnosis_layer import compute_diagnosis, compute_capital_text, compute_rolling_summary_with_today
+        import pandas as pd
+
+        storage = Storage("price")
+        metrics_path = storage.get_processed_path("daily_metrics.parquet")
+        if metrics_path.exists():
+            df_metrics = pd.read_parquet(metrics_path)
+            if not df_metrics.empty:
+                latest_metrics = df_metrics.iloc[0].to_dict()
+
+                # 计算诊断结果（rolling 可能为 None）
+                diagnosis = compute_diagnosis(latest_metrics, rolling)
+                capital_text = compute_capital_text(latest_metrics)
+
+                # 计算包含今日的近5日摘要
+                rolling_summary_text = compute_rolling_summary_with_today(
+                    rolling,
+                    latest_metrics.get("relative_strength"),
+                    latest_metrics.get("amount_vs_5d_avg"),
+                )
+
+                # 合并到 metrics
+                latest_metrics.update(diagnosis)
+                latest_metrics.update(capital_text)
+                latest_metrics["rolling_summary_text"] = rolling_summary_text
+
+                # 保存回 daily_metrics
+                pd.DataFrame([latest_metrics]).to_parquet(metrics_path, index=False)
+                print(f"[INFO] 诊断完成: {diagnosis.get('diagnosis_label', 'N/A')}")
+    except Exception as e:
+        print(f"[WARN] 诊断层失败（不影响主流程）: {e}")
+
+    # Step 8: 反抽观察层
+    print("\n[Step 8/8] 计算反抽观察...")
     try:
         import pandas as pd
         from src.price.rolling_analyzer import load_rolling_metrics

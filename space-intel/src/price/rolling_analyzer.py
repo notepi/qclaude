@@ -475,6 +475,73 @@ def build_trend_summary(
     return "".join(sentences)
 
 
+def build_rolling_summary_text(
+    pm: Dict[str, Any],
+    vm: Dict[str, Any],
+    mf: Dict[str, Any],
+    momentum_label: str,
+    available_days: int,
+) -> str:
+    """
+    v2.7 新增：生成压缩版近N日结构摘要（供 reporter 直接使用）
+
+    格式：
+    跑赢板块 4/5 日，平均相对强弱 -0.59%，属于"胜率尚可，但幅度偏弱"；量能 连续缩量；资金面有改善迹象。
+    """
+    if available_days < 2:
+        return f"历史数据不足（当前仅 {available_days} 日归档），近5日状态暂不可用。"
+
+    n = available_days
+
+    # 跑赢天数
+    out_days = pm.get("rs_outperform_days_5d", 0) or 0
+    rs_mean = pm.get("rs_5d_mean")
+    rs_mean_str = _fmt_pct(rs_mean)
+
+    # 结构描述
+    if out_days >= 4:
+        structure_desc = "胜率较高"
+    elif out_days >= 3:
+        if rs_mean is not None and rs_mean > 0:
+            structure_desc = "胜率尚可，幅度占优"
+        else:
+            structure_desc = "胜率尚可，但幅度偏弱"
+    elif out_days >= 2:
+        structure_desc = "结构中性"
+    else:
+        structure_desc = "胜率偏低"
+
+    # 量能描述
+    consec_shrink = vm.get("volume_consecutive_shrink", 0) or 0
+    consec_expand = vm.get("volume_consecutive_expand", 0) or 0
+    volume_trend_label = vm.get("volume_trend_label", "")
+
+    if consec_shrink >= 2:
+        volume_desc = "连续缩量"
+    elif consec_expand >= 2:
+        volume_desc = "连续放量"
+    elif volume_trend_label == "量能平稳":
+        volume_desc = "量能平稳"
+    else:
+        volume_desc = volume_trend_label or "量能平稳"
+
+    # 资金描述
+    mf_inflow_days = mf.get("mf_inflow_days_5d")
+    cf_trend_label = mf.get("capital_flow_trend_label", "")
+
+    if mf_inflow_days is not None:
+        if mf_inflow_days >= 3:
+            capital_desc = "资金面偏强"
+        elif mf_inflow_days >= 2:
+            capital_desc = "资金面有改善迹象"
+        else:
+            capital_desc = "资金面偏弱"
+    else:
+        capital_desc = "资金数据缺失"
+
+    return f"跑赢板块 **{out_days}/{n} 日**，平均相对强弱 **{rs_mean_str}**，属于\"{structure_desc}\"；量能 **{volume_desc}**；{capital_desc}。"
+
+
 # ─────────────────────────────────────────────
 # 主入口
 # ─────────────────────────────────────────────
@@ -521,6 +588,7 @@ def compute_rolling_metrics(
     volume_label = compute_volume_trend_label(vm)
     momentum_label = compute_momentum_label(price_label, volume_label)
     trend_summary = build_trend_summary(pm, vm, momentum_label, available_days)
+    rolling_summary_text = build_rolling_summary_text(pm, vm, mf, momentum_label, available_days)
 
     result = {
         "trade_date": latest_date,
@@ -544,6 +612,7 @@ def compute_rolling_metrics(
         "momentum_label": momentum_label,
         # 摘要
         "trend_summary": trend_summary,
+        "rolling_summary_text": rolling_summary_text,
         # v2.5C P1 新增：主力资金连续性
         "mf_inflow_days_5d":       mf["mf_inflow_days_5d"],
         "mf_consecutive_inflow":   mf["mf_consecutive_inflow"],
